@@ -1,5 +1,8 @@
 #![feature(
     const_fn,
+    allocator_api,
+    slice_ptr_get,
+    raw_ref_macros,
 )]
 
 mod object;

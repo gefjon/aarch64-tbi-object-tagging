@@ -1,81 +1,110 @@
-use super::{Fixnum, Object, tag::{self, Tag, Word}};
-use std::{marker::PhantomData, mem};
+use super::{Fixnum,
+            Object,
+            typeinfo::{Boxed, FixedSize, Type, VariableSize},
+            word::Word,
+            tag,
+            Vector};
+use std::{alloc::{AllocRef, Global, Layout},
+          ops::Deref,
+          mem,
+          ptr};
+
 
 #[repr(transparent)]
-#[derive(Copy, Clone)]
-pub struct GcPtr<T: ?Sized> {
-    ptr: *mut ObjHeader,
-    _t: PhantomData<T>,
+pub struct GcPtr<T> {
+    ptr: *mut T,
 }
 
-#[repr(C)]
-pub struct ObjHeader {
-    length: Fixnum,
-    /// note: there may be more than one object here, that is, we may
-    /// effectively cast `&self.body` into a pointer to `[Object;
-    /// self.length]`.
-    ///
-    /// This field has type `[Object; 1]` so that it will be correctly
-    /// aligned. It's an array, rather than `Object`, because I
-    /// *think* Rust's pointer-aliasing rules prohibit casting a
-    /// pointer to an array element into a pointer to its containing
-    /// array, but allow casting a pointer to an array into a shorter
-    /// or longer array.
-    body: [Object; 1],
+
+impl<T: Boxed> GcPtr<T> {
+    /// invariant: `ptr` must point to a valid instance of `T`
+    /// allocated by the garbage collector
+    unsafe fn from_raw(ptr: *mut T) -> Self { Self {
+            ptr: tag::add_tag(ptr, T::ID),
+    } }
 }
 
-impl<T: ?Sized> GcPtr<T> {
-    #[cfg(target_arch = "aarch64")]
-    #[inline(always)]
-    fn obj_header(&self) -> &ObjHeader {
-        unsafe { &*self.ptr}
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    #[inline(always)]
-    fn obj_header(&self) -> &ObjHeader {
-        let ptr = tag::remove_tag(self.ptr);
-        unsafe { &*ptr }
-    }
-    #[inline(always)]
-    fn length(&self) -> Fixnum {
-        self.obj_header().length
-    }
-    #[inline(always)]
-    fn body(&self) -> *const [Object; 1] {
-        &self.obj_header().body
-    }
-}
-
-impl<T: ?Sized> Word for GcPtr<T> {
-    #[inline(always)]
-    fn to_u64(self) -> u64 { self.ptr.to_u64() }
-    #[inline(always)]
-    fn from_u64(u: u64) -> Self {
-        debug_assert_eq!(tag::extract_tag(u), Tag::Gc);
-        GcPtr {
-            ptr: Word::from_u64(u),
-            _t: PhantomData,
+impl<T: FixedSize> GcPtr<T> {
+    pub fn alloc(t: T) -> GcPtr<T> {
+        let layout = Layout::from_size_align(
+            mem::size_of::<T>(),
+            mem::align_of::<T>(),
+        ).unwrap();
+        let ptr = Global.alloc(layout).unwrap()
+            .as_mut_ptr().cast::<T>();
+        unsafe {
+            ptr::write(ptr, t);
+            Self::from_raw(ptr)
         }
     }
 }
 
-fn bytes_to_words(bytes: u64) -> u64 {
-    (bytes + 7) / 8
+impl<T> GcPtr<Vector<T>>
+where
+    Vector<T>: VariableSize,
+    T: Copy,
+{
+    pub fn alloc_vector(elts: &[T]) -> GcPtr<Vector<T>> {
+        let layout = <Vector<T>>::layout(elts.len());
+        let ptr = Global.alloc(layout).unwrap()
+            .as_mut_ptr().cast::<Vector<T>>();
+        unsafe {
+            ptr::copy_nonoverlapping(
+                elts.as_ptr(),
+                <Vector<T>>::elementpointer_mut(ptr, Fixnum::from_u64(0)),
+                elts.len(),
+            );
+            Self::from_raw(ptr)
+        }
+    }
 }
 
-fn size_in_words<T: Sized>() -> u64 {
-    bytes_to_words(mem::size_of::<T>() as _)
+impl<T: Boxed> Copy for GcPtr<T> {}
+impl<T: Boxed> Clone for GcPtr<T> {
+    fn clone(&self) -> Self { Self { ptr: self.ptr } }
 }
 
-impl<T: Sized> std::ops::Deref for GcPtr<T> {
+impl<T: Boxed> GcPtr<T> {
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    fn deref_inner(&self) -> &T {
+        unsafe { &*self.ptr}
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    #[inline(always)]
+    fn deref_inner(&self) -> &T {
+        let ptr = tag::remove_tag(self.ptr);
+        unsafe { &*ptr }
+    }
+}
+
+impl<T: Boxed> Word for GcPtr<T> {
+    #[inline(always)]
+    fn to_u64(self) -> u64 { self.ptr.to_u64() }
+    #[inline(always)]
+    fn from_u64(u: u64) -> Self {
+        GcPtr {
+            ptr: Word::from_u64(u),
+        }
+    }
+}
+
+#[allow(unused)]
+fn is_aligned<T>(ptr: u64) -> bool {
+    let ptr = ptr as usize;
+    let align = mem::align_of::<T>();
+    let mask = align - 1;
+    (ptr & mask) == 0
+}
+
+impl<T: Boxed> Deref for GcPtr<T> {
     type Target = T;
     #[inline(always)]
     fn deref(&self) -> &T {
-        debug_assert!(mem::align_of::<T>() <= mem::align_of::<[Object; 1]>());
+        debug_assert!(is_aligned::<T>(self.to_u64()));
         debug_assert!(!self.ptr.is_null());
-        debug_assert_eq!(size_in_words::<T>(), self.length().to_u64());
-        let body = self.body() as *const T;
-        unsafe { &*body }
+        debug_assert_eq!(tag::extract_tag(*self), T::ID);
+        self.deref_inner()
     }
 }
 
