@@ -1,4 +1,4 @@
-use super::{Immediate, typeinfo, TypeId, Type, tag, word::Word};
+use super::{Immediate, TypeId, Type, tag, word::Word};
 use std::{cmp, ops};
 
 #[repr(transparent)]
@@ -22,10 +22,10 @@ impl Word for Fixnum {
 }
 
 impl Fixnum {
-    fn to_i64(self) -> i64 {
+    pub fn to_i64(self) -> i64 {
         make_signed(self.0)
     }
-    fn from_i64(i: i64) -> Self {
+    pub fn from_i64(i: i64) -> Self {
         Self::from_u64(make_unsigned(i))
     }
 }

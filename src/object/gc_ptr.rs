@@ -1,26 +1,28 @@
-use super::{Fixnum,
-            Object,
-            typeinfo::{Boxed, FixedSize, Type, VariableSize},
+use super::{typeinfo::{Boxed, FixedSize},
             word::Word,
             tag,
-            Vector};
+            Array};
 use std::{alloc::{AllocRef, Global, Layout},
-          ops::Deref,
+          cell::Cell,
           mem,
+          ops::Deref,
           ptr};
 
 
 #[repr(transparent)]
 pub struct GcPtr<T> {
-    ptr: *mut T,
+    ptr: Cell<*mut T>,
 }
 
 
 impl<T: Boxed> GcPtr<T> {
+    /// construct a `GcPtr` which points to `ptr`, tagging it in the
+    /// process.
+    ///
     /// invariant: `ptr` must point to a valid instance of `T`
     /// allocated by the garbage collector
     unsafe fn from_raw(ptr: *mut T) -> Self { Self {
-            ptr: tag::add_tag(ptr, T::ID),
+        ptr: Cell::new(tag::add_tag(ptr, T::ID)),
     } }
 }
 
@@ -39,52 +41,47 @@ impl<T: FixedSize> GcPtr<T> {
     }
 }
 
-impl<T> GcPtr<Vector<T>>
+impl<T> GcPtr<Array<T>>
 where
-    Vector<T>: VariableSize,
-    T: Copy,
+    Array<T>: Boxed,
+    T: Clone,
 {
-    pub fn alloc_vector(elts: &[T]) -> GcPtr<Vector<T>> {
-        let layout = <Vector<T>>::layout(elts.len());
+    pub fn alloc_array(elts: &[T]) -> GcPtr<Array<T>> {
+        let layout = <Array<T>>::layout(elts.len());
         let ptr = Global.alloc(layout).unwrap()
-            .as_mut_ptr().cast::<Vector<T>>();
+            .as_mut_ptr().cast::<Array<T>>();
         unsafe {
-            ptr::copy_nonoverlapping(
-                elts.as_ptr(),
-                <Vector<T>>::elementpointer_mut(ptr, Fixnum::from_u64(0)),
-                elts.len(),
-            );
+            Array::initialize(ptr, elts);
             Self::from_raw(ptr)
         }
     }
 }
 
-impl<T: Boxed> Copy for GcPtr<T> {}
 impl<T: Boxed> Clone for GcPtr<T> {
-    fn clone(&self) -> Self { Self { ptr: self.ptr } }
+    fn clone(&self) -> Self { Self { ptr: self.ptr.clone() } }
 }
 
 impl<T: Boxed> GcPtr<T> {
     #[cfg(target_arch = "aarch64")]
     #[inline(always)]
     fn deref_inner(&self) -> &T {
-        unsafe { &*self.ptr}
+        unsafe { &*self.ptr.get() }
     }
     #[cfg(not(target_arch = "aarch64"))]
     #[inline(always)]
     fn deref_inner(&self) -> &T {
-        let ptr = tag::remove_tag(self.ptr);
+        let ptr = tag::remove_tag(self.ptr.get());
         unsafe { &*ptr }
     }
 }
 
 impl<T: Boxed> Word for GcPtr<T> {
     #[inline(always)]
-    fn to_u64(self) -> u64 { self.ptr.to_u64() }
+    fn to_u64(self) -> u64 { self.ptr.get().to_u64() }
     #[inline(always)]
     fn from_u64(u: u64) -> Self {
         GcPtr {
-            ptr: Word::from_u64(u),
+            ptr: Cell::new(Word::from_u64(u)),
         }
     }
 }
@@ -101,9 +98,10 @@ impl<T: Boxed> Deref for GcPtr<T> {
     type Target = T;
     #[inline(always)]
     fn deref(&self) -> &T {
-        debug_assert!(is_aligned::<T>(self.to_u64()));
-        debug_assert!(!self.ptr.is_null());
-        debug_assert_eq!(tag::extract_tag(*self), T::ID);
+        let _ptr = self.ptr.get();
+        debug_assert!(is_aligned::<T>(_ptr.to_u64()));
+        debug_assert!(!_ptr.is_null());
+        debug_assert_eq!(tag::extract_tag(_ptr), T::ID);
         self.deref_inner()
     }
 }
